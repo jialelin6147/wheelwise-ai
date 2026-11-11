@@ -1,0 +1,103 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WheelWise</title>
+<style>
+body{font:16px system-ui;margin:0;background:#101923;color:#edf3f8}
+main{max-width:1000px;margin:40px auto;padding:24px}
+h1{font-size:42px;margin-bottom:4px}
+p{color:#afbdcc}
+section{background:#1b2937;padding:24px;border-radius:18px;margin:20px 0}
+button{background:#b9ef66;color:#142019;border:0;padding:12px 20px;border-radius:8px;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+button:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid #b9ef66;outline-offset:2px}
+input{padding:12px;border-radius:8px;max-width:95%}
+#q{width:70%}
+a{color:#b9ef66}
+article{white-space:pre-wrap;padding:15px;border-bottom:1px solid #40505e}
+.warn{margin-top:10px;padding:10px 12px;border-left:4px solid #f2b84b;background:#2b2a22;color:#f6dca0;border-radius:6px}
+.meta{margin-top:8px;font-size:13px;color:#8d9db0}
+#status{color:#b9ef66}
+#health{font-size:14px;color:#afbdcc}
+#health.bad{color:#f2b84b}
+li{margin:12px 0}
+summary{cursor:pointer}
+.ghost{background:transparent;color:#afbdcc;border:1px solid #40505e;padding:6px 12px;margin-left:12px}
+</style>
+<main>
+<h1>WheelWise</h1>
+<p>Your tire knowledge, with sources.</p>
+<p id="health" role="status">Checking Ollama…</p>
+<section>
+<h2>Research library</h2>
+<p>Upload PDF, DOCX, TXT or Markdown. Indexing can take a few minutes.</p>
+<input type="file" id="file" accept=".pdf,.docx,.txt,.md"><button id="upload">Upload &amp; index</button>
+<p id="status" role="status"></p><ul id="files"></ul>
+</section>
+<section>
+<h2>Ask your documents<button class="ghost" id="clear" type="button">Clear chat</button></h2>
+<div id="chat" aria-live="polite"></div>
+<form id="form"><input id="q" placeholder="What does a tire load index mean?" required><button id="send">Ask</button></form>
+<p>Educational document research. Check vehicle-specific approvals with the manufacturer.</p>
+</section>
+</main>
+<script>
+let history=[];const $=id=>document.getElementById(id);
+async function json(url,opts){const r=await fetch(url,opts);const d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);return d}
+
+async function checkHealth(){
+  const h=$('health');
+  try{
+    const d=await json('/api/health');
+    if(!d.ollama){h.textContent='Ollama is not running. Start it, then reload.';h.className='bad';return}
+    const missing=[];if(!d.chat_model_ready)missing.push(d.chat_model);if(!d.embed_model_ready)missing.push(d.embed_model);
+    if(missing.length){h.textContent='Missing model: run "ollama pull '+missing.join('" and "ollama pull ')+'".';h.className='bad'}
+    else{h.textContent='Ollama ready · '+d.chat_model+(d.hybrid_search?' · hybrid search on':'');h.className=''}
+  }catch(e){h.textContent='Cannot reach the WheelWise server.';h.className='bad'}
+}
+
+async function list(){const fs=await json('/api/files');$('files').replaceChildren();for(const f of fs){const li=document.createElement('li'),a=document.createElement('a'),b=document.createElement('button');a.textContent=f.name;a.href='/api/files/'+f.id;a.target='_blank';a.rel='noopener';b.textContent='Remove';b.style.marginLeft='20px';b.onclick=async()=>{if(confirm('Remove '+f.name+' from your local library?')){await json(a.href,{method:'DELETE'});await list()}};li.append(a,b);$('files').append(li)}}
+
+$('upload').onclick=async()=>{if(!$('file').files[0])return;$('upload').disabled=true;$('status').textContent='Indexing…';try{let f=new FormData();f.append('file',$('file').files[0]);const r=await json('/api/upload',{method:'POST',body:f});$('status').textContent='Ready — '+r.chunks+' passages indexed';$('file').value='';await list()}catch(e){$('status').textContent=e.message}finally{$('upload').disabled=false}};
+
+function message(text){const a=document.createElement('article');a.textContent=text;$('chat').append(a);return a}
+function seconds(ms){return ms==null?'–':(ms/1000).toFixed(1)+'s'}
+
+function renderSources(box,sources){
+  box.replaceChildren();
+  for(const s of sources){
+    const d=document.createElement('details'),sm=document.createElement('summary'),l=document.createElement('a'),p=document.createElement('p');
+    sm.textContent='['+s.number+'] '+s.name+' • page/section '+s.page+' • match '+s.similarity;
+    l.href=s.url;l.textContent='Open source';l.target='_blank';l.rel='noopener';p.textContent=s.excerpt;
+    d.append(sm,l,p);box.append(d);
+  }
+}
+
+$('form').onsubmit=async e=>{
+  e.preventDefault();const q=$('q').value.trim();if(!q)return;
+  message('You: '+q);$('q').value='';$('send').disabled=true;
+  const art=message('');const text=document.createElement('div'),warn=document.createElement('div'),meta=document.createElement('div'),src=document.createElement('div');
+  meta.className='meta';text.textContent='Searching documents…';art.append(text,warn,meta,src);
+  let answer='';
+  try{
+    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:q,history:history.slice(-4)})});
+    if(!r.ok){const d=await r.json().catch(()=>({}));throw Error(d.error||r.statusText)}
+    const reader=r.body.getReader(),dec=new TextDecoder();let buf='';
+    const handle=m=>{
+      if(m.type==='sources'){renderSources(src,m.sources);text.textContent='Writing answer…'}
+      else if(m.type==='token'){answer+=m.text;text.textContent=answer}
+      else if(m.type==='error'){throw Error(m.error)}
+      else if(m.type==='done'){
+        if(m.unverified&&m.unverified.length){warn.className='warn';warn.textContent='Check these numbers against the sources — they were not found in the retrieved excerpts: '+m.unverified.join(', ')}
+        meta.textContent='Search '+seconds(m.retrieval_ms)+' · first words '+seconds(m.first_token_ms)+' · total '+seconds(m.total_ms);
+      }
+    };
+    for(;;){
+      const {done,value}=await reader.read();if(done)break;
+      buf+=dec.decode(value,{stream:true});let i;
+      while((i=buf.indexOf('\n'))>=0){const line=buf.slice(0,i);buf=buf.slice(i+1);if(line.trim())handle(JSON.parse(line))}
+    }
+    history.push({role:'user',content:q},{role:'assistant',content:answer});
+  }catch(err){text.textContent=answer?answer+'\n\n['+err.message+']':err.message}
+  finally{$('send').disabled=false}
+};
+$('clear').onclick=()=>{history=[];$('chat').replaceChildren()};
+list().catch(e=>$('status').textContent=e.message);checkHealth();
+</script></html>
